@@ -1,9 +1,24 @@
+import os
+import sys
+import subprocess
+
+# --- 🚀 起動時にライブラリを強制インストールする魔法 ---
+def install_and_import(package):
+    try:
+        __import__(package)
+    except ImportError:
+        print(f"📦 {package} が見つからないのでインストールします...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# geopyを強制インストール
+install_and_import('geopy')
+
+# ここから通常のインポート
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List
 import json
-import os
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 
@@ -54,7 +69,8 @@ class AnalyzeJobRequest(BaseModel):
 def get_estimated_distance(addr1, addr2):
     try:
         if not addr1 or not addr2: return 0.0
-        geolocator = Nominatim(user_agent="const_app_fixed_v6")
+        # Render環境でも動きやすいようにUser-Agentを工夫
+        geolocator = Nominatim(user_agent="my_const_app_final_deploy")
         loc1 = geolocator.geocode(addr1)
         loc2 = geolocator.geocode(addr2)
         if loc1 and loc2:
@@ -62,7 +78,8 @@ def get_estimated_distance(addr1, addr2):
             p2 = (loc2.latitude, loc2.longitude)
             dist = geodesic(p1, p2).km
             return round(dist * 1.3, 1)
-    except: pass
+    except Exception as e:
+        print(f"Distance calculation error: {e}")
     return 0.0
 
 # --- 📡 APIエンドポイント ---
@@ -78,94 +95,61 @@ def load_data(user_id: str):
 
 @app.post("/api/data/{user_id}")
 def save_data(user_id: str, data: UserData):
-    # すべてのデータをここで一括保存（データ消失防止）
     with open(get_user_path(user_id), "w", encoding="utf-8") as f:
         json.dump(data.dict(), f, ensure_ascii=False, indent=4)
     return {"status": "ok"}
 
-# ★ AI予兆診断ロジック
 @app.post("/api/analyze")
 def analyze_job(req: AnalyzeJobRequest):
     user_data = load_data(req.user_id)
-    # インデックス範囲チェック
     if not (0 <= req.job_index < len(user_data['jobs'])):
         return {"status": "error"}
-
     job = user_data['jobs'][req.job_index]
     total_exp = sum([e['amount'] for e in job.get('expenses', [])])
     current_day = job.get('current_day', 0)
     duration = job.get('duration', 1)
     budget = job.get('budget', 0)
-    
-    if current_day == 0:
-        return {"status": "nodata"}
-    
-    # 1. 現状分析
+    if current_day == 0: return {"status": "nodata"}
     avg_daily_cost = total_exp / current_day
     remaining_days = duration - current_day
-    
-    # 2. 未来予測 (Aパターン: 現状維持)
     predicted_total = total_exp + (avg_daily_cost * remaining_days)
     predicted_profit = budget - predicted_total
-    
-    # 3. 対策立案 (Bパターン: 改善案)
     current_profit = budget - total_exp
     allowed_daily_cost = current_profit / remaining_days if remaining_days > 0 else 0
     cut_needed = avg_daily_cost - allowed_daily_cost
     cut_people = round(cut_needed / 18000, 1)
-
     return {
         "status": "ok",
-        "current": {
-            "day": current_day,
-            "avg_cost": int(avg_daily_cost),
-            "spent": total_exp
-        },
-        "prediction": {
-            "final_cost": int(predicted_total),
-            "final_profit": int(predicted_profit),
-            "is_danger": predicted_profit < 0
-        },
-        "advice": {
-            "cut_daily": int(cut_needed),
-            "cut_people": cut_people
-        }
+        "current": {"day": current_day, "avg_cost": int(avg_daily_cost), "spent": total_exp},
+        "prediction": {"final_cost": int(predicted_total), "final_profit": int(predicted_profit), "is_danger": predicted_profit < 0},
+        "advice": {"cut_daily": int(cut_needed), "cut_people": cut_people}
     }
 
-# ★ 受注前予測ロジック
 @app.post("/api/predict")
 def predict(req: PredictRequest):
     user_data_dict = load_data(req.user_id)
     office_addr = user_data_dict.get("office_address", "")
     employees = user_data_dict.get("employees", [])
     dist = get_estimated_distance(office_addr, req.site_address)
-    
     one_day_fuel = (dist * 2 / 8) * 170
     total_fuel = int(one_day_fuel * req.duration)
     total_toll = int((dist * 25) * 2 * req.duration) if dist > 30 else 0
     transport_total = total_fuel + total_toll
-    
     daily_team_cost = sum([e['wage'] for e in employees]) if employees else 18000
     labor_total = daily_team_cost * req.duration
-    
     total_cost = transport_total + labor_total
     profit = req.budget - total_cost
     margin = (profit / req.budget * 100) if req.budget > 0 else 0
-    
-    if margin >= 30: status = "✅ 超優良"
-    elif margin >= 20: status = "⭕ 良好"
-    elif margin >= 10: status = "⚠️ 注意"
-    else: status = "🚨 赤字危険"
-
+    status = "✅ 超優良" if margin >= 30 else ("⭕ 良好" if margin >= 20 else ("⚠️ 注意" if margin >= 10 else "🚨 赤字危険"))
     return {
         "meta": {"dist": dist, "days": req.duration, "head_count": len(employees)},
         "breakdown": {"transport": transport_total, "labor": labor_total, "total": total_cost},
         "result": {"profit": profit, "margin": margin, "status": status}
     }
 
-# --- 🖥️ 画面 ---
 @app.get("/", response_class=HTMLResponse)
 def read_root():
+    # ※ここは以前のHTMLコードと全く同じなので、そのまま保持されます
     return """
 <!DOCTYPE html>
 <html lang="ja">
@@ -184,16 +168,14 @@ def read_root():
     </style>
 </head>
 <body class="max-w-md mx-auto min-h-screen pb-20">
-
     <div id="v-login" class="view active px-6 pt-20">
         <h1 class="text-4xl font-black text-center mb-2 tracking-tighter">現場マネージャー</h1>
-        <p class="text-center text-slate-400 mb-10 font-bold">Construction AI v6.0 (Stable)</p>
+        <p class="text-center text-slate-400 mb-10 font-bold">Construction AI v6.1 (Stable)</p>
         <div class="card p-8 space-y-4 shadow-xl">
             <input type="text" id="user_id" class="w-full border-2 p-4 rounded-xl text-lg font-bold" placeholder="ユーザーID">
             <button onclick="login()" class="w-full bg-slate-900 text-white p-4 rounded-xl font-bold text-lg shadow-lg active:scale-95 transition">ログイン</button>
         </div>
     </div>
-
     <div id="v-dash" class="view px-6 pt-8">
         <header class="flex justify-between items-center mb-8">
             <h2 class="text-xl font-black">MENU</h2>
@@ -214,7 +196,6 @@ def read_root():
             </button>
         </div>
     </div>
-
     <div id="v-set" class="view px-6 pt-8">
         <button onclick="show('v-dash')" class="mb-4 text-sm font-bold text-slate-400">← MENU</button>
         <h2 class="text-xl font-black mb-4">⚙️ 会社設定</h2>
@@ -240,14 +221,12 @@ def read_root():
             <button onclick="saveAll()" class="w-full bg-blue-600 text-white p-4 rounded-xl font-bold shadow-lg">設定を保存</button>
         </div>
     </div>
-
     <div id="v-mgr" class="view px-6 pt-8 pb-32">
         <button onclick="show('v-dash')" class="mb-4 text-sm font-bold text-slate-400">← MENU</button>
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-black">📈 現場管理</h2>
             <button onclick="toggleAddJob()" class="bg-slate-900 text-white text-xs px-4 py-2 rounded-full font-bold shadow-lg">＋ 新規現場</button>
         </div>
-        
         <div id="add-job-box" class="hidden card p-5 mb-6 space-y-3 border-2 border-slate-200">
             <input type="text" id="j-n" class="w-full border-2 p-2 rounded-lg text-sm font-bold" placeholder="現場名">
             <input type="number" id="j-b" class="w-full border-2 p-2 rounded-lg text-sm font-bold" placeholder="受注金額">
@@ -257,9 +236,7 @@ def read_root():
             </div>
             <button onclick="addJob()" class="w-full bg-emerald-600 text-white p-2 rounded-lg font-bold text-sm shadow">登録開始</button>
         </div>
-
         <div id="job-list" class="space-y-6"></div>
-
         <div id="modal-exp" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-6 z-50 backdrop-blur-sm">
             <div class="bg-white w-full max-w-sm rounded-3xl p-6 space-y-4 shadow-2xl">
                 <h3 class="font-black text-xl text-center" id="modal-title">経費入力</h3>
@@ -277,7 +254,6 @@ def read_root():
                 </div>
             </div>
         </div>
-
         <div id="modal-ai" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
             <div class="bg-white w-full max-w-md rounded-3xl p-6 shadow-2xl overflow-y-auto max-h-[80vh]">
                 <div class="flex justify-between items-center mb-4">
@@ -311,7 +287,6 @@ def read_root():
             </div>
         </div>
     </div>
-
     <div id="v-pre" class="view px-6 pt-8 pb-20">
         <button onclick="show('v-dash')" class="mb-4 text-sm font-bold text-slate-400">← MENU</button>
         <h2 class="text-xl font-black mb-4">🏗️ 利益予測</h2>
@@ -343,12 +318,10 @@ def read_root():
             </div>
         </div>
     </div>
-
     <script>
         let user = null;
         let data = { office_address: "", employees: [], jobs: [] };
         let currentJobIndex = -1;
-
         function show(id) {
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.getElementById(id).classList.add('active');
@@ -363,13 +336,10 @@ def read_root():
             document.getElementById('set-addr').value = data.office_address || "";
             show('v-dash');
         }
-
-        // --- データ操作 (すべてローカルdataを操作してから一括saveAllする方式に変更) ---
         async function saveAll() {
             data.office_address = document.getElementById('set-addr').value;
             await fetch('/api/data/'+user, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
         }
-
         function renderEmps() {
             document.getElementById('emp-list').innerHTML = data.employees.map((e, i) => `
                 <div class="flex justify-between bg-white border p-3 rounded-xl text-xs font-bold items-center shadow-sm">
@@ -385,8 +355,6 @@ def read_root():
             const r = document.getElementById('emp-r').value;
             if(n && w) { data.employees.push({name:n, wage:w, rank:r}); saveAll(); renderEmps(); document.getElementById('emp-n').value=''; }
         }
-
-        // --- 現場管理 ---
         function renderJobs() {
             document.getElementById('job-list').innerHTML = data.jobs.map((j, i) => {
                 const totalExp = (j.expenses || []).reduce((sum, e) => sum + e.amount, 0);
@@ -395,16 +363,13 @@ def read_root():
                 const statusColor = progress > 80 ? "bg-red-500" : (progress > 50 ? "bg-orange-400" : "bg-emerald-500");
                 const curDay = j.current_day || 0;
                 const duration = j.duration || 1;
-
                 return `
                 <div class="card p-5 shadow-md border border-slate-100 relative">
                     <button onclick="deleteJob(${i})" class="absolute top-4 right-4 text-slate-300 hover:text-red-500 font-bold text-xs p-2">🗑️ 削除</button>
-
                     <div class="mb-4 pr-10">
                         <h3 class="font-black text-xl text-slate-800">${j.name}</h3>
                         <p class="text-xs text-slate-400 font-bold mt-1">予算: ¥${j.budget.toLocaleString()}</p>
                     </div>
-
                     <div class="flex gap-2 mb-4">
                         <button onclick="openAiModal(${i})" class="flex-1 bg-purple-600 text-white text-[10px] px-3 py-2 rounded-lg font-bold shadow-md active:scale-95 transition flex items-center justify-center gap-1">
                             🔮 AI診断
@@ -413,7 +378,6 @@ def read_root():
                             ＋ 経費入力
                         </button>
                     </div>
-
                     <div class="bg-slate-50 p-3 rounded-xl mb-4 flex justify-between items-center border border-slate-200">
                         <span class="text-xs font-bold text-slate-500">経過日数</span>
                         <div class="flex items-center gap-3">
@@ -422,11 +386,9 @@ def read_root():
                             <button onclick="updateDay(${i}, 1)" class="w-8 h-8 bg-white rounded-full font-bold shadow text-blue-500 hover:bg-blue-50">+</button>
                         </div>
                     </div>
-
                     <div class="w-full bg-slate-100 h-3 rounded-full overflow-hidden mb-2">
                         <div class="${statusColor} h-full progress-bar" style="width: ${progress}%"></div>
                     </div>
-                    
                     <div class="flex justify-between items-end">
                         <div class="text-xs text-slate-500 font-bold">支出: ¥${totalExp.toLocaleString()}</div>
                         <div class="text-right">
@@ -442,17 +404,10 @@ def read_root():
             const n = document.getElementById('j-n').value;
             const b = parseInt(document.getElementById('j-b').value);
             const d = parseInt(document.getElementById('j-d').value);
-            if(n && b && d) { 
-                data.jobs.push({name:n, budget:b, duration:d, current_day:0, expenses:[]}); 
-                saveAll(); renderJobs(); toggleAddJob(); 
-            }
+            if(n && b && d) { data.jobs.push({name:n, budget:b, duration:d, current_day:0, expenses:[]}); saveAll(); renderJobs(); toggleAddJob(); }
         }
         function deleteJob(index) {
-            if(confirm("本当にこの現場を削除しますか？")) {
-                data.jobs.splice(index, 1);
-                saveAll();
-                renderJobs();
-            }
+            if(confirm("本当にこの現場を削除しますか？")) { data.jobs.splice(index, 1); saveAll(); renderJobs(); }
         }
         function updateDay(index, change) {
             let job = data.jobs[index];
@@ -460,20 +415,14 @@ def read_root():
             if(newDay < 0) newDay = 0;
             if(newDay > job.duration) newDay = job.duration;
             job.current_day = newDay;
-            saveAll();
-            renderJobs();
+            saveAll(); renderJobs();
         }
-
-        // --- 経費モーダル ---
         function openModal(index) {
             currentJobIndex = index;
             document.getElementById('modal-title').innerText = `${data.jobs[index].name}`;
             document.getElementById('modal-exp').classList.remove('hidden');
         }
-        function closeModal() {
-            document.getElementById('modal-exp').classList.add('hidden');
-            document.getElementById('exp-amount').value = '';
-        }
+        function closeModal() { document.getElementById('modal-exp').classList.add('hidden'); document.getElementById('exp-amount').value = ''; }
         function setExpType(type) {
             document.getElementById('exp-type').value = type;
             document.querySelectorAll('.exp-btn').forEach(b => b.classList.remove('bg-slate-200'));
@@ -483,28 +432,20 @@ def read_root():
             const amount = parseInt(document.getElementById('exp-amount').value);
             const type = document.getElementById('exp-type').value || 'other';
             if(amount && currentJobIndex >= 0) {
-                // ローカルのデータに追加して一括保存（データ消失防止策）
                 if(!data.jobs[currentJobIndex].expenses) data.jobs[currentJobIndex].expenses = [];
                 data.jobs[currentJobIndex].expenses.push({type:type, amount:amount, date:""});
-                await saveAll();
-                renderJobs();
-                closeModal();
+                await saveAll(); renderJobs(); closeModal();
             }
         }
-
-        // --- AI予兆診断 ---
         async function openAiModal(index) {
             document.getElementById('modal-ai').classList.remove('hidden');
             document.getElementById('ai-loading').classList.remove('hidden');
             document.getElementById('ai-content').classList.add('hidden');
-            
             const req = { user_id: user, job_index: index };
             const res = await fetch('/api/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(req)});
             const r = await res.json();
-            
             document.getElementById('ai-loading').classList.add('hidden');
             document.getElementById('ai-content').classList.remove('hidden');
-            
             if(r.status === 'nodata') {
                 document.getElementById('ai-pred-profit').innerText = "データ不足";
                 document.getElementById('ai-pred-msg').innerText = "まずは経過日数を入力してください";
@@ -513,12 +454,10 @@ def read_root():
                 document.getElementById('ai-advice-ok').classList.add('hidden');
                 return;
             }
-
             const profit = r.prediction.final_profit;
             const pEl = document.getElementById('ai-pred-profit');
             pEl.innerText = (profit > 0 ? "+" : "") + profit.toLocaleString() + "円";
             pEl.className = `text-4xl font-black tracking-tight mb-2 ${profit < 0 ? 'text-red-500' : 'text-emerald-500'}`;
-            
             const msgEl = document.getElementById('ai-pred-msg');
             if(profit < 0) {
                 msgEl.innerText = "🚨 このままだと赤字確定です";
@@ -535,15 +474,8 @@ def read_root():
             }
         }
         function closeAiModal() { document.getElementById('modal-ai').classList.add('hidden'); }
-
-        // --- 利益予測 ---
         async function runPre() {
-            const req = {
-                site_address: document.getElementById('p-addr').value,
-                budget: parseInt(document.getElementById('p-bud').value),
-                duration: parseInt(document.getElementById('p-dur').value),
-                user_id: user
-            };
+            const req = { site_address: document.getElementById('p-addr').value, budget: parseInt(document.getElementById('p-bud').value), duration: parseInt(document.getElementById('p-dur').value), user_id: user };
             const res = await fetch('/api/predict', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(req)});
             const r = await res.json();
             document.getElementById('p-res').classList.remove('hidden');
