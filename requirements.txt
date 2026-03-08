@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pydantic
+geopy
+jinja2
+python-multipart
